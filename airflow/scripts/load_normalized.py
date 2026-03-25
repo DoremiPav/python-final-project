@@ -4,6 +4,7 @@ import os
 from typing import Dict, List
 
 import numpy as np
+import re
 import pandas as pd
 import psycopg2
 from psycopg2.extras import execute_values
@@ -58,7 +59,7 @@ def build_normalized_data():
         for _, row in (
             df[["user_id", "user_phone"]].drop_duplicates("user_id").iterrows()
         ):
-            users_dict[row["user_id"]] = row["user_phone"]
+            users_dict[row["user_id"]] = normalize_phone(row["user_phone"])
 
         for _, row in (
             df[["store_id", "store_address"]].drop_duplicates("store_id").iterrows()
@@ -71,7 +72,7 @@ def build_normalized_data():
             .drop_duplicates("driver_id")
         )
         for _, row in driver_subset.iterrows():
-            drivers_dict[row["driver_id"]] = row["driver_phone"]
+            drivers_dict[row["driver_id"]] = normalize_phone(row["driver_phone"])
 
         for _, row in (
             df[["item_id", "item_title", "item_category"]]
@@ -275,6 +276,21 @@ def normalize_value(value):
     if isinstance(value, np.generic):
         return value.item()
     return value
+
+
+def normalize_phone(phone):
+    if pd.isna(phone):
+        return None
+
+    digits = re.sub(r"\D", "", str(phone))
+
+    if not digits:
+        return None
+
+    if len(digits) == 11 and digits.startswith("8"):
+        digits = "7" + digits[1:]
+
+    return digits
 
 
 def load_table(df: pd.DataFrame, table_name: str, conn, page_size: int = 10000):
