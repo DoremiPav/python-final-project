@@ -16,7 +16,7 @@ with DAG(
         "retries": 0,
         "retry_delay": timedelta(minutes=1),
     },
-    tags=["final_project", "quality", "checks"],
+    tags=["quality"],
 ) as dag:
 
     run_quality_checks_task = PythonOperator(

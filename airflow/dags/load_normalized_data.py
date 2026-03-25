@@ -8,7 +8,7 @@ from scripts.load_normalized import run_load
 
 with DAG(
     dag_id="load_normalized_data",
-    start_date=datetime(2024, 1, 1),  # ???
+    start_date=datetime(2024, 1, 1),
     schedule=None,
     catchup=False,
     default_args={
@@ -16,7 +16,7 @@ with DAG(
         "retries": 1,
         "retry_delay": timedelta(minutes=1),
     },
-    tags=["final_project", "etl", "normalized"],
+    tags=["normalized"],
 ) as dag:
 
     load_normalized = PythonOperator(
