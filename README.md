@@ -14,6 +14,12 @@
 docker compose up -d --build
 ```
 
+Для сброса сервисов вместе с кешем:
+
+```bash
+docker-compose down -v --remove-orphans
+```
+
 ## Сервисы
 
 | Сервис       | URL                     | Логин                | Пароль             |

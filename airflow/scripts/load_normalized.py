@@ -1,10 +1,10 @@
 import gc
 import glob
 import os
+import re
 from typing import Dict, List
 
 import numpy as np
-import re
 import pandas as pd
 import psycopg2
 from psycopg2.extras import execute_values
@@ -16,13 +16,15 @@ DB_URI = os.getenv(
     "postgresql+psycopg2://project_user:project_password@postgres:5432/project_db",
 )
 
-DATA_PATH = os.getenv("RAW_DATA_PATH", "/opt/airflow/data/raw/*.parquet")
+RAW_DATA_PATH = os.getenv("RAW_DATA_PATH", "/opt/airflow/data/raw/*.parquet")
 
 
 def get_parquet_files() -> List[str]:
-    files = sorted(glob.glob(DATA_PATH))
+    files = sorted(glob.glob(RAW_DATA_PATH))
     if not files:
-        raise FileNotFoundError(f"No parquet files found by path: {DATA_PATH}")
+        raise FileNotFoundError(
+            f"No parquet files found by path: {RAW_DATA_PATH}. "
+        )
     return files
 
 
@@ -41,6 +43,29 @@ def get_pg_connection():
     return psycopg2.connect(**get_db_params())
 
 
+def normalize_value(value):
+    if pd.isna(value):
+        return None
+    if isinstance(value, np.generic):
+        return value.item()
+    return value
+
+
+def normalize_phone(phone):
+    if pd.isna(phone):
+        return None
+
+    digits = re.sub(r"\D", "", str(phone))
+
+    if not digits:
+        return None
+
+    if len(digits) == 11 and digits.startswith("8"):
+        digits = "7" + digits[1:]
+
+    return digits
+
+
 def build_normalized_data():
     parquet_files = get_parquet_files()
 
@@ -56,15 +81,11 @@ def build_normalized_data():
     for file_path in parquet_files:
         df = pd.read_parquet(file_path)
 
-        for _, row in (
-            df[["user_id", "user_phone"]].drop_duplicates("user_id").iterrows()
-        ):
-            users_dict[row["user_id"]] = normalize_phone(row["user_phone"])
+        for _, row in df[["user_id", "user_phone"]].drop_duplicates("user_id").iterrows():
+            users_dict[int(row["user_id"])] = normalize_phone(row["user_phone"])
 
-        for _, row in (
-            df[["store_id", "store_address"]].drop_duplicates("store_id").iterrows()
-        ):
-            stores_dict[row["store_id"]] = row["store_address"]
+        for _, row in df[["store_id", "store_address"]].drop_duplicates("store_id").iterrows():
+            stores_dict[int(row["store_id"])] = row["store_address"]
 
         driver_subset = (
             df[["driver_id", "driver_phone"]]
@@ -72,14 +93,10 @@ def build_normalized_data():
             .drop_duplicates("driver_id")
         )
         for _, row in driver_subset.iterrows():
-            drivers_dict[row["driver_id"]] = normalize_phone(row["driver_phone"])
+            drivers_dict[int(row["driver_id"])] = normalize_phone(row["driver_phone"])
 
-        for _, row in (
-            df[["item_id", "item_title", "item_category"]]
-            .drop_duplicates("item_id")
-            .iterrows()
-        ):
-            items_dict[row["item_id"]] = (row["item_title"], row["item_category"])
+        for _, row in df[["item_id", "item_title", "item_category"]].drop_duplicates("item_id").iterrows():
+            items_dict[int(row["item_id"])] = (row["item_title"], row["item_category"])
 
         orders_current = df.groupby("order_id", as_index=False).agg(
             {
@@ -112,15 +129,11 @@ def build_normalized_data():
             }
         )
 
-        order_items_current["replaced_by_item_id"] = order_items_current[
-            "item_replaced_id"
-        ].replace(-1, np.nan)
+        order_items_current["replaced_by_item_id"] = order_items_current["item_replaced_id"].replace(-1, np.nan)
         order_items_current = order_items_current.drop(columns=["item_replaced_id"])
         all_order_items.append(order_items_current)
 
-        orders_info = orders_current.set_index("order_id")[
-            ["delivered_at", "canceled_at"]
-        ].to_dict("index")
+        orders_info = orders_current.set_index("order_id")[["delivered_at", "canceled_at"]].to_dict("index")
 
         driver_history = (
             df[["order_id", "driver_id", "delivery_started_at"]]
@@ -163,7 +176,8 @@ def build_normalized_data():
 
     users = (
         pd.DataFrame(
-            [(k, v) for k, v in users_dict.items()], columns=["user_id", "user_phone"]
+            [(k, v) for k, v in users_dict.items()],
+            columns=["user_id", "user_phone"],
         )
         .sort_values("user_id")
         .reset_index(drop=True)
@@ -265,37 +279,13 @@ def truncate_target_tables(conn):
                 stores,
                 users
             RESTART IDENTITY CASCADE;
-        """
+            """
         )
-    conn.commit()
-
-
-def normalize_value(value):
-    if pd.isna(value):
-        return None
-    if isinstance(value, np.generic):
-        return value.item()
-    return value
-
-
-def normalize_phone(phone):
-    if pd.isna(phone):
-        return None
-
-    digits = re.sub(r"\D", "", str(phone))
-
-    if not digits:
-        return None
-
-    if len(digits) == 11 and digits.startswith("8"):
-        digits = "7" + digits[1:]
-
-    return digits
 
 
 def load_table(df: pd.DataFrame, table_name: str, conn, page_size: int = 10000):
     if df.empty:
-        return
+        return 0
 
     columns = list(df.columns)
     values = [
@@ -311,24 +301,35 @@ def load_table(df: pd.DataFrame, table_name: str, conn, page_size: int = 10000):
     with conn.cursor() as cur:
         execute_values(cur, insert_sql, values, page_size=page_size)
 
-    conn.commit()
+    return len(values)
 
 
 def run_load():
     data = build_normalized_data()
 
+    row_counts = {name: len(df) for name, df in data.items()}
+    print(f"Input row counts: {row_counts}")
+    print(f"Using RAW_DATA_PATH={RAW_DATA_PATH}")
+
     conn = get_pg_connection()
     try:
         truncate_target_tables(conn)
 
-        load_table(data["users"], "users", conn)
-        load_table(data["stores"], "stores", conn)
-        load_table(data["drivers"], "drivers", conn)
-        load_table(data["items"], "items", conn)
-        load_table(data["orders"], "orders", conn)
-        load_table(data["order_items"], "order_items", conn)
-        load_table(data["delivery_assignments"], "delivery_assignments", conn)
+        inserted = {
+            "users": load_table(data["users"], "users", conn),
+            "stores": load_table(data["stores"], "stores", conn),
+            "drivers": load_table(data["drivers"], "drivers", conn),
+            "items": load_table(data["items"], "items", conn),
+            "orders": load_table(data["orders"], "orders", conn),
+            "order_items": load_table(data["order_items"], "order_items", conn),
+            "delivery_assignments": load_table(data["delivery_assignments"], "delivery_assignments", conn),
+        }
 
-        return {name: len(df) for name, df in data.items()}
+        conn.commit()
+        print(f"Inserted row counts: {inserted}")
+        return inserted
+    except Exception:
+        conn.rollback()
+        raise
     finally:
         conn.close()
